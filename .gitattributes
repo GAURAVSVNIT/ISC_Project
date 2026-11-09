@@ -1,0 +1,1 @@
+backend/weights/clip_finetuned/finetuned_clip.pth filter=lfs diff=lfs merge=lfs -text

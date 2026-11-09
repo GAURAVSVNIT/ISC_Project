@@ -1,0 +1,10 @@
+ERROR in analyze endpoint: No module named 'serpapi'
+Traceback (most recent call last):
+  File "S:\Echelon\backend\main.py", line 55, in analyze
+    stream_results = await orchestrator.process_request(file_bytes, claim)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "S:\Echelon\backend\core\orchestrator.py", line 54, in process_request
+    from ..streams.context_xfacta import fetch_xfacta_evidence
+  File "S:\Echelon\backend\streams\context_xfacta.py", line 2, in <module>
+    from serpapi import GoogleSearch
+ModuleNotFoundError: No module named 'serpapi'

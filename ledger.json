@@ -1,0 +1,25 @@
+[
+    {
+        "index": 0,
+        "timestamp": 1769907462.86006,
+        "data": {
+            "event": "Genesis Block",
+            "system": "Echelon AI"
+        },
+        "previous_hash": "0",
+        "hash": "464dcd4f4abb3e2c001345fd03e563a85882b6a0b51f5f5cff4d976d10984b5b"
+    },
+    {
+        "index": 1,
+        "timestamp": 1769907462.860695,
+        "data": {
+            "claim": "I saw her in the righest way",
+            "verdict": "Authentic",
+            "confidence": 0.5222671907395124,
+            "visual_score": 0.267647385597229,
+            "model_version": "1.0.0"
+        },
+        "previous_hash": "464dcd4f4abb3e2c001345fd03e563a85882b6a0b51f5f5cff4d976d10984b5b",
+        "hash": "176e30d600c603d17c2c9ad4083ac09b23f07a299df72de49b18628a543e87ae"
+    }
+]

@@ -1,0 +1,22 @@
+node_modules/
+__pycache__/
+.env
+.DS_Store
+dist/
+build/
+.vscode/
+.idea/
+backend/data/
+Model
+training
+
+# Ignore large model weights
+# Ignore large model weights
+backend/weights/
+*.safetensors
+*.pth
+*.pt
+
+# LFS Exceptions
+!backend/weights/clip_finetuned/finetuned_clip.pth
+ledger.json
