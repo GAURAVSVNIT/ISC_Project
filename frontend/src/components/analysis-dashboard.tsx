@@ -133,7 +133,7 @@ export function AnalysisDashboard() {
                         </p>
                     </div>
 
-                    <div className="flex flex-col items-center gap-4 mb-8 w-full max-w-md mx-auto">
+                    <div className="flex flex-col items-center gap-3 mb-8 w-full max-w-lg mx-auto">
                         <div className="w-full">
                             <Input
                                 placeholder="Enter claim to verify (e.g., 'Is this image real?')"
@@ -143,11 +143,24 @@ export function AnalysisDashboard() {
                                 disabled={isAnalyzing}
                             />
                         </div>
-
+                        <div className="flex flex-wrap gap-2 justify-center">
+                            {[
+                                "Is this image AI-generated?",
+                                "Deepfake face swap verification",
+                                "Verify breaking news event context",
+                            ].map((sample) => (
+                                <button
+                                    key={sample}
+                                    type="button"
+                                    onClick={() => setClaim(sample)}
+                                    className="text-xs px-3 py-1 rounded-full bg-muted/60 hover:bg-primary/10 hover:text-primary transition-colors border border-border/40 text-muted-foreground cursor-pointer disabled:opacity-50"
+                                    disabled={isAnalyzing}
+                                >
+                                    {sample}
+                                </button>
+                            ))}
+                        </div>
                     </div>
-
-                    {/* Debug: Log result structure to inspect missing context */}
-                    {result && console.log("Analysis Result:", result)}
 
                     <UploadZone
                         onFileSelect={handleFileSelect}
