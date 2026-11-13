@@ -121,7 +121,12 @@ export function UploadZone({ onFileSelect, isAnalyzing }: UploadZoneProps) {
                                     <p className="font-semibold text-foreground text-lg">{fileName}</p>
                                     <p className="text-sm text-muted-foreground">Video file loaded</p>
                                 </div>
-                                <video controls src={preview} className="w-full max-w-md mt-4 rounded-lg" />
+                                <video
+                                    controls
+                                    src={preview}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="w-full max-w-md mt-4 rounded-lg"
+                                />
                             </div>
                         ) : (
                             <div className="flex flex-col items-center justify-center space-y-4 p-8 w-full">
@@ -132,7 +137,12 @@ export function UploadZone({ onFileSelect, isAnalyzing }: UploadZoneProps) {
                                     <p className="font-semibold text-foreground text-lg">{fileName}</p>
                                     <p className="text-sm text-muted-foreground">Audio file loaded</p>
                                 </div>
-                                <audio controls src={preview} className="w-full max-w-md mt-4" />
+                                <audio
+                                    controls
+                                    src={preview}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="w-full max-w-md mt-4"
+                                />
                             </div>
                         )}
 
@@ -172,10 +182,10 @@ export function UploadZone({ onFileSelect, isAnalyzing }: UploadZoneProps) {
                                 Drag & drop or click to browse
                             </p>
                         </div>
-                        <div className="flex gap-2 text-xs text-muted-foreground/60">
-                            <span className="flex items-center gap-1"><File className="w-3 h-3" /> Images & Audio</span>
+                        <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground/60">
+                            <span className="flex items-center gap-1"><File className="w-3 h-3" /> Image, Audio & Video (≤ 15s)</span>
                             <span>•</span>
-                            <span>Max 15MB</span>
+                            <span>Max 100MB</span>
                         </div>
                     </div>
                 )}

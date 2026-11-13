@@ -157,20 +157,42 @@ export default function HomePage() {
           <p className="text-muted-foreground max-w-xl mx-auto">
             Bring trust, transparency, and explainability to your media pipelines.
           </p>
-          <div className="flex justify-center gap-4">
-            <Button size="lg" className="rounded-full px-10">
-              Request Demo
-            </Button>
-            <Button size="lg" variant="outline" className="rounded-full">
-              Talk to Engineering <ArrowRight className="ml-2 h-4 w-4" />
-            </Button>
+          <div className="flex flex-wrap justify-center gap-4">
+            <Link href="/product">
+              <Button size="lg" className="rounded-full px-10">
+                Launch Detection Engine
+              </Button>
+            </Link>
+            <Link href="/docs/client">
+              <Button size="lg" variant="outline" className="rounded-full">
+                API & Integration Docs <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </Link>
           </div>
         </div>
       </section>
 
       {/* ================= FOOTER ================= */}
-      <footer className="border-t border-border/40 py-6 text-center text-sm text-muted-foreground">
-        © 2026 Veritas · All streams active
+      <footer className="border-t border-border/40 py-8 bg-muted/10">
+        <div className="container mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <Shield className="h-4 w-4 text-primary" />
+            <span>© 2026 Veritas · Multi-Modal Verification Platform</span>
+          </div>
+          <div className="flex items-center gap-6 text-xs">
+            <Link href="/" className="hover:text-foreground transition-colors">Home</Link>
+            <Link href="/product" className="hover:text-foreground transition-colors">Product</Link>
+            <Link href="/docs/client" className="hover:text-foreground transition-colors">Documentation</Link>
+            <a
+              href="https://github.com/GAURAVSVNIT/ISC_Project"
+              target="_blank"
+              rel="noreferrer"
+              className="hover:text-foreground transition-colors"
+            >
+              GitHub
+            </a>
+          </div>
+        </div>
       </footer>
     </div>
   );

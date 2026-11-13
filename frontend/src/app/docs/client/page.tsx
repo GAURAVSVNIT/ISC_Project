@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import { Copy, Check, Terminal, Play, Shield, Activity, Lock, Moon, Sun, Server, Globe, Cpu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
@@ -185,14 +186,17 @@ func main() {
             {/* Sticky Header */}
             <header className="sticky top-0 z-50 w-full border-b border-white/5 bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/60">
                 <div className="container mx-auto flex h-14 items-center justify-between px-4">
-                    <div className="flex items-center gap-2 font-bold text-lg tracking-tight">
+                    <Link href="/" className="flex items-center gap-2 font-bold text-lg tracking-tight hover:opacity-90 transition-opacity">
                         <Shield className="h-5 w-5 text-primary" />
                         <span>Veritas <span className="text-muted-foreground font-normal">Docs</span></span>
-                    </div>
-                    <div className="flex items-center gap-4">
-                        <Button variant="ghost" size="sm" className="hidden sm:flex text-muted-foreground hover:text-foreground">
-                            Support
-                        </Button>
+                    </Link>
+                    <div className="flex items-center gap-2 sm:gap-4">
+                        <Link href="/product">
+                            <Button variant="ghost" size="sm">Product</Button>
+                        </Link>
+                        <Link href="/">
+                            <Button variant="ghost" size="sm">Home</Button>
+                        </Link>
                         <div className="h-4 w-px bg-border hidden sm:block"></div>
                         <VThemeToggle />
                     </div>
