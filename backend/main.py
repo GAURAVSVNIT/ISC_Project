@@ -287,6 +287,18 @@ async def analyze(
         "verification": verification
     }
     
+def _looks_like_audio(data: bytes) -> bool:
+    """Sniff common audio containers by magic bytes (MP3, WAV, FLAC, OGG, AAC/ADTS)."""
+    h = data[:12]
+    if h.startswith(b"ID3") or h.startswith(b"fLaC") or h.startswith(b"OggS"):
+        return True
+    if h[:4] == b"RIFF" and h[8:12] == b"WAVE":
+        return True
+    # MPEG audio frame sync (11 set bits) and ADTS AAC
+    if len(h) >= 2 and h[0] == 0xFF and (h[1] & 0xE0) == 0xE0:
+        return True
+    return False
+
 @app.websocket("/ws/analyze")
 async def analyze_realtime(websocket: WebSocket):
     """
@@ -318,7 +330,43 @@ async def analyze_realtime(websocket: WebSocket):
              Image.open(io.BytesIO(image_bytes)).verify()
         except Exception:
              is_video = True # PIL failed -> Assume Video/Audio
-        
+
+        # Audio files (mp3/wav/flac/ogg/aac) must not go to the video pipeline.
+        if is_video and _looks_like_audio(image_bytes):
+             is_video = False
+             await websocket.send_json({
+                "stage": "audio_processing",
+                "progress": 20,
+                "message": "🎵 Analyzing Audio...",
+                "status": "processing"
+             })
+
+             stream_results = await orchestrator.process_audio_request(image_bytes, claim)
+             audio_result = stream_results.get("audio", {}) or {}
+             score = float(audio_result.get("score", 0.0))
+             is_fake_audio = score >= 0.5
+             a_verdict = "Fake" if is_fake_audio else "Authentic"
+             a_conf = score if is_fake_audio else (1.0 - score)
+
+             await websocket.send_json({
+                "stage": "complete",
+                "progress": 100,
+                "message": f"✅ Audio Analysis Complete - {a_verdict}",
+                "status": "success",
+                "results": {
+                    "verdict": a_verdict,
+                    "confidence_score": float(a_conf),
+                    "explanation": f"Audio analysis indicates {audio_result.get('status', 'Unknown')}",
+                    "visual": stream_results.get("visual", {}),
+                    "semantic": stream_results.get("semantic", {}),
+                    "context": stream_results.get("contextual", {}),
+                    "audio": audio_result,
+                    "metadata": stream_results.get("metadata"),
+                    "cost_optimized": bool(stream_results.get("cost_optimized", False)),
+                }
+             })
+             return
+
         if is_video:
              # --- VIDEO PIPELINE ---
              await websocket.send_json({

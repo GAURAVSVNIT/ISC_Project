@@ -42,17 +42,17 @@ async def run_test(image_path: str, caption: str):
 
     # 3. Execute API Call (Simulating Orchestrator role)
     print("\n[3] Executing API Call (Orchestrator Simulation)...")
-    if not settings.OPENAI_API_KEY:
-        print("Error: OPENAI_API_KEY not set in environment or config. Cannot execute model.")
+    if not settings.GROQ_API_KEY:
+        print("Error: GROQ_API_KEY not set in environment or config. Cannot execute model.")
         print("Dumping prompt structure instead:")
         print(json.dumps(messages, indent=2))
         return
 
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    client = AsyncOpenAI(api_key=settings.GROQ_API_KEY, base_url=settings.GROQ_BASE_URL)
     
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model=settings.GROQ_MODEL,
             messages=messages,
             response_format={"type": "json_object"},
             temperature=0.0

@@ -7,7 +7,9 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     
     # API Keys
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     SERPAPI_API_KEY: str = os.getenv("SERPAPI_API_KEY", "")
     OCR_SPACE_API_KEY: str = os.getenv("OCR_SPACE_API_KEY", "")
     

@@ -61,7 +61,7 @@ class AudioStream:
                 y = librosa.util.fix_length(y, size=window_samples)
                 windows = [y]
             else:
-                frames = librosa.util.frames(y, frame_length=window_samples, hop_length=int(sr * 0.5))
+                frames = librosa.util.frame(y, frame_length=window_samples, hop_length=int(sr * 0.5))
                 windows = [librosa.util.fix_length(frame, size=window_samples) for frame in frames.T]
 
             return windows, sr

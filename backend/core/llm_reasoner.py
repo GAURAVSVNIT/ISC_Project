@@ -10,24 +10,23 @@ class LLMReasoner:
     """
     Explainable AI Module.
     Synthesizes results from the 'Triangle of Truth' (Visual, Semantic, Context)
-    into a human-readable forensic report using an LLM (GPT-4o).
+    into a human-readable forensic report using an LLM (Groq).
     """
     
     def __init__(self):
-        self.api_key = settings.OPENAI_API_KEY
+        self.api_key = settings.GROQ_API_KEY
         self.enabled = False
         
         if self.api_key and len(self.api_key) > 10:
-            openai.api_key = self.api_key
             self.enabled = True
             try:
-                self.client = openai.OpenAI(api_key=self.api_key)
-                logger.info("LLM Reasoner initialized with OpenAI (GPT-4o).")
+                self.client = openai.OpenAI(api_key=self.api_key, base_url=settings.GROQ_BASE_URL)
+                logger.info(f"LLM Reasoner initialized with Groq ({settings.GROQ_MODEL}).")
             except Exception as e:
-                logger.warning(f"Failed to initialize OpenAI client: {e}")
+                logger.warning(f"Failed to initialize Groq client: {e}")
                 self.enabled = False
         else:
-            logger.warning("LLM Reasoner disabled: Missing OPENAI_API_KEY.")
+            logger.warning("LLM Reasoner disabled: Missing GROQ_API_KEY.")
 
     def explain(self, stream_results: Dict[str, Any], claim: str) -> str:
         """
@@ -64,12 +63,13 @@ class LLMReasoner:
             )
 
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model=settings.GROQ_MODEL,
                 messages=[ 
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=200,
+                max_tokens=1000,
+                reasoning_effort="low",
                 temperature=0.4 # Slightly creative but grounded
             )
             

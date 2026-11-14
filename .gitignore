@@ -9,6 +9,7 @@ build/
 backend/data/
 Model
 training
+Echelon/
 
 # Ignore large model weights
 # Ignore large model weights

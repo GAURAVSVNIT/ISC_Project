@@ -12,6 +12,8 @@ interface UploadZoneProps {
     isAnalyzing: boolean;
 }
 
+const MAX_DURATION_SECONDS = 20;
+
 export function UploadZone({ onFileSelect, isAnalyzing }: UploadZoneProps) {
     const [preview, setPreview] = useState<string | null>(null);
     const [fileType, setFileType] = useState<'image' | 'audio' | 'video' | null>(null);
@@ -24,7 +26,7 @@ export function UploadZone({ onFileSelect, isAnalyzing }: UploadZoneProps) {
             video.preload = 'metadata';
             video.onloadedmetadata = () => {
                 window.URL.revokeObjectURL(video.src);
-                resolve(video.duration <= 15);
+                resolve(video.duration <= MAX_DURATION_SECONDS);
             };
             video.onerror = () => {
                 resolve(false); // Fail validation on error
@@ -57,7 +59,7 @@ export function UploadZone({ onFileSelect, isAnalyzing }: UploadZoneProps) {
         if (isVideo || isAudio) {
             const isValidDuration = await validateDuration(file);
             if (!isValidDuration) {
-                setError('Media duration must be 15 seconds or less.');
+                setError(`Media duration must be ${MAX_DURATION_SECONDS} seconds or less.`);
                 return;
             }
         }
@@ -183,7 +185,7 @@ export function UploadZone({ onFileSelect, isAnalyzing }: UploadZoneProps) {
                             </p>
                         </div>
                         <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground/60">
-                            <span className="flex items-center gap-1"><File className="w-3 h-3" /> Image, Audio & Video (≤ 15s)</span>
+                            <span className="flex items-center gap-1"><File className="w-3 h-3" /> Image, Audio & Video (≤ {MAX_DURATION_SECONDS}s)</span>
                             <span>•</span>
                             <span>Max 100MB</span>
                         </div>
