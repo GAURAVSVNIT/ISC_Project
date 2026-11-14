@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
-import { Shield, Eye, Brain, Globe, Check, Loader2 } from "lucide-react";
+import { Shield, Eye, Brain, Globe, Check, Loader2, Upload, Film, Music, Scale, FileText, ScanSearch } from "lucide-react";
 
 interface LoadingOverlayProps {
     isVisible: boolean;
@@ -16,6 +16,14 @@ const stageIcons: Record<string, any> = {
     visual: Brain,
     semantic: Brain,
     context: Globe,
+    upload: Upload,
+    video_probe: Film,
+    video_frames: Film,
+    audio: Music,
+    audio_processing: Music,
+    multimodal: ScanSearch,
+    fusion: Scale,
+    explanation: FileText,
     complete: Check,
 };
 

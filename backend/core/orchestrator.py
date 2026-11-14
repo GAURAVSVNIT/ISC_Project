@@ -1,12 +1,13 @@
 import asyncio
-from typing import Dict, Any
+import hashlib
 import os
+import shutil
+import tempfile
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from ..streams.genesis import genesis_stream
 from ..streams.semantic import semantic_stream
 from ..utils.metadata_filter import metadata_filter
-from ..utils.video_processor import extract_components
-import os
 # from ..streams.context import context_stream (Dev 3 will implement)
 
 class Orchestrator:
@@ -164,128 +165,223 @@ class Orchestrator:
             "cost_optimized": False
         }
 
-    async def process_video_request(self, file_bytes: bytes, claim: str):
+    async def process_video_request(
+        self,
+        file_bytes: bytes,
+        claim: str,
+        progress: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
+        filename: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Process a VIDEO request:
-        1. Container Metadata Check (Short Circuit)
-        2. Extract Middle Frame -> Shield -> Stream A/B
-        3. Extract Audio -> Stream D
+        End-to-end video analysis.
+
+        1. Probe the container (reject non-videos; hand audio-only files to the audio pipeline)
+        2. Provenance check: C2PA Content Credentials + AI-tool tags  -> may short-circuit
+        3. Sample frames across the whole video + extract the audio track
+        4. Stream V: score every sampled frame, build timeline and suspicious segments
+        5. Stream D on the audio track; claim consistency and web context (informational)
+        6. Fuse visual + audio into verdict / confidence
+
+        `progress(stage, percent, message)` is awaited between steps (used by the WebSocket).
+        Raises VideoError for uploads that cannot be analysed. Model failures propagate as
+        exceptions too: an error must never be reported as an "Authentic" verdict.
         """
-        # 1. Container Metadata Check (Optimization)
-        metadata_result = metadata_filter.check(file_bytes)
-        if metadata_result["should_short_circuit"]:
-             return {
-                "visual": {"score": 1.0, "status": "AI-Generated (Metadata)"},
-                "semantic": {"score": 0.0, "status": "Skipped"},
-                "audio": {"score": 1.0, "status": "AI-Generated (Metadata)"},
-                "contextual": {"found": False},
-                "metadata": metadata_result,
-                "cost_optimized": True,
-                "verdict": "Fake"
+        from ..config import settings
+        from ..utils import video_processor as vp
+        from ..utils.video_metadata import inspect_video_metadata
+        from ..streams.video import video_stream
+        from .fusion import fuse_video, audio_is_usable
+
+        async def report(stage: str, percent: int, message: str):
+            if progress is not None:
+                await progress(stage, percent, message)
+
+        media_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        workdir = tempfile.mkdtemp(prefix="echelon_video_")
+        ext = os.path.splitext(filename or "")[1].lower()
+        if ext not in (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".m4a", ".3gp"):
+            ext = ".mp4"
+        video_path = os.path.join(workdir, f"input{ext}")
+        wav_path = os.path.join(workdir, "audio.wav")
+
+        try:
+            def _write():
+                with open(video_path, "wb") as fh:
+                    fh.write(file_bytes)
+            await asyncio.to_thread(_write)
+
+            # ---- 1. Probe ----
+            await report("video_probe", 8, "🎞️ Reading video container...")
+            info = await asyncio.to_thread(vp.probe, video_path)
+
+            if not info.has_video:
+                if info.has_audio:
+                    # Audio in a video container (e.g. .m4a): analyse it as audio.
+                    extracted = await asyncio.to_thread(vp.extract_audio, video_path, wav_path)
+                    if not extracted:
+                        raise vp.VideoError("The file has an audio track but it could not be decoded.")
+                    with open(extracted, "rb") as fh:
+                        wav_bytes = fh.read()
+                    await report("audio_processing", 30, "🎵 Audio-only file - analysing audio...")
+                    result = await self.process_audio_request(wav_bytes, claim)
+                    result["media_type"] = "audio"
+                    result["media_sha256"] = media_sha256
+                    return result
+                raise vp.VideoError("This file is not a readable video (unsupported format or corrupt upload).")
+
+            if info.duration and info.duration > settings.VIDEO_MAX_DURATION_S:
+                raise vp.VideoError(
+                    f"Video is {info.duration:.0f}s long; the limit is {settings.VIDEO_MAX_DURATION_S:.0f}s."
+                )
+
+            # ---- 2. Provenance (no model cost) ----
+            await report("metadata", 12, "📋 Checking provenance (C2PA, container tags)...")
+            metadata_result = await asyncio.to_thread(inspect_video_metadata, video_path, info)
+            if metadata_result["should_short_circuit"]:
+                return {
+                    "media_type": "video",
+                    "media_sha256": media_sha256,
+                    "verdict": "Fake",
+                    "confidence_score": 0.95,
+                    "risk_score": 0.95,
+                    "visual": {"score": 1.0, "status": "AI-Generated (Metadata)", "model": "Provenance check"},
+                    "semantic": {"score": 0.0, "status": "N/A (skipped)"},
+                    "context": {"evidence_found": False, "summary": "", "sources": []},
+                    "audio": None,
+                    "metadata": metadata_result,
+                    "video": {**info.public(), "frames_analyzed": 0, "timeline": [], "segments": [],
+                              "drivers": ["metadata"], "notes": [metadata_result["reason"]]},
+                    "cost_optimized": True,
+                }
+
+            # ---- 3. Decode: frames + audio in parallel ----
+            n_frames = vp.frames_to_sample(
+                info.duration, settings.VIDEO_FRAMES_PER_SECOND, settings.VIDEO_MIN_FRAMES, settings.VIDEO_MAX_FRAMES
+            )
+            await report("video_frames", 20, f"🎥 Sampling {n_frames} frames across the video...")
+            frames_job = asyncio.to_thread(vp.sample_frames, video_path, info, n_frames)
+            if info.has_audio is False:
+                frames, audio_file = await frames_job, None
+            else:
+                frames, audio_file = await asyncio.gather(
+                    frames_job, asyncio.to_thread(vp.extract_audio, video_path, wav_path, settings.VIDEO_MAX_DURATION_S)
+                )
+            if not frames:
+                raise vp.VideoError("Could not decode any frames from this video.")
+
+            # ---- 4. Visual forensics on every sampled frame ----
+            await report("visual", 35, f"🔍 Scanning {len(frames)} frames for AI-generation artifacts...")
+            visual = await asyncio.to_thread(video_stream.analyze, frames)
+
+            # ---- 5. Audio + claim signals ----
+            await report("audio", 65, "🎵 Analysing audio track, claim and web context...")
+            has_claim = bool(claim and claim.strip())
+            middle = frames[len(frames) // 2]
+
+            async def run_semantic():
+                if not has_claim:
+                    return {"score": 0.0, "status": "N/A (no claim)"}
+                from PIL import Image
+                import io
+                buf = io.BytesIO()
+                Image.fromarray(middle.image).save(buf, format="PNG")
+                return await asyncio.to_thread(lambda: asyncio.run(semantic_stream.analyze(buf.getvalue(), claim)))
+
+            async def run_context():
+                if not has_claim:
+                    return {"evidence_found": False, "summary": "", "sources": []}
+                return await asyncio.to_thread(lambda: asyncio.run(self._run_context_stream(claim)))
+
+            audio, semantic, context = await asyncio.gather(
+                self._analyze_video_audio(audio_file), run_semantic(), run_context(), return_exceptions=True
+            )
+            if isinstance(audio, Exception):
+                audio = {"score": 0.0, "status": f"Error: {audio}", "usable": False}
+            if isinstance(semantic, Exception):
+                semantic = {"score": 0.0, "status": f"Error: {semantic}"}
+            if isinstance(context, Exception):
+                context = {"evidence_found": False, "summary": "", "sources": [], "error": str(context)}
+
+            multimodal = None
+            if settings.VIDEO_AV_CONSISTENCY and audio_is_usable(audio):
+                await report("multimodal", 82, "🔗 Checking audio-visual consistency...")
+                multimodal = await asyncio.to_thread(self._run_av_consistency, middle, audio_file, workdir)
+
+            # ---- 6. Fusion ----
+            await report("fusion", 90, "⚖️ Combining signals into a verdict...")
+            fusion = fuse_video(
+                visual, audio, settings.VIDEO_FAKE_THRESHOLD, settings.VIDEO_UNCERTAIN_MARGIN,
+                audio_can_convict=settings.VIDEO_AUDIO_CAN_CONVICT,
+            )
+
+            timeline = visual.pop("timeline")
+            segments = visual.pop("segments")
+            peak_index = visual.pop("peak_index")
+            for entry, frame in zip(timeline, frames):
+                entry["thumb"] = vp.thumbnail_b64(frame.image, width=160)
+            peak = frames[peak_index]
+            video_block = {
+                **info.public(),
+                "frames_analyzed": len(frames),
+                "timeline": timeline,
+                "segments": segments,
+                "peak_frame": {
+                    "index": peak.index,
+                    "time": round(peak.time, 2),
+                    "score": timeline[peak_index]["score"],
+                    "image": vp.thumbnail_b64(peak.image, width=640, quality=80),
+                },
+                "drivers": fusion["drivers"],
+                "notes": fusion["notes"],
             }
 
-        results = {}
-        
-        # 2. Component Extraction
-        components = await extract_components(file_bytes)
-        if not components:
-            return {"error": "Failed to process video file."}
-            
-        image_path = components.get("image_path")
-        audio_path = components.get("audio_path")
-        
-        tasks = []
-        
-        # 3. Visual Tasks (Stream A + Stream B + Metadata)
-        img_bytes = None
-        if image_path and os.path.exists(image_path):
-            try:
-                with open(image_path, "rb") as f:
-                    img_bytes = f.read()
-                
-                # Cleanup frame file
-                try: os.remove(image_path)
-                except: pass
-                
-                # --- CRITICAL FIX: Apply ArtShield to Frame ---
-                from ..defense.art_shield import shield
-                # Apply same "Light Touch" defense as main image pipeline
-                # 1. Save raw for fallback/metadata check inside process_request
-                raw_frame_bytes = img_bytes
-                # 2. Sanitize (Blur 0.5 + Resize)
-                img_bytes = shield.sanitize(img_bytes)
-                print(f"[Orchestrator] Video Frame Sanitized. Size: {len(img_bytes)} bytes")
-                # -----------------------------------------------
-            except Exception as e:
-                print(f"[Orchestrator] Error processing frame: {e}")
-                return {"error": f"Frame processing failing: {str(e)}"}
+            result = {
+                "media_type": "video",
+                "media_sha256": media_sha256,
+                "verdict": fusion["verdict"],
+                "confidence_score": fusion["confidence_score"],
+                "risk_score": fusion["risk_score"],
+                "visual": visual,
+                "semantic": semantic,
+                "context": context,
+                "audio": audio,
+                "metadata": metadata_result,
+                "video": video_block,
+                "cost_optimized": False,
+            }
+            if multimodal is not None:
+                result["multimodal"] = multimodal
+            return result
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
-        # Sanity Check & Debug
-        if not img_bytes:
-            return {"error": "Video frame extraction failed (no bytes loaded)."}
+    async def _analyze_video_audio(self, audio_file: Optional[str]) -> Dict[str, Any]:
+        """Run the synthetic-voice detector on an extracted track. `usable` says whether it may vote."""
+        from ..utils import video_processor as vp
 
-        print(f"[Orchestrator] Read {len(img_bytes)} bytes. Header: {img_bytes[:10].hex() if len(img_bytes)>10 else img_bytes}")
+        if not audio_file:
+            return {"score": 0.0, "status": "No Audio Track", "usable": False}
+        level = await asyncio.to_thread(vp.audio_rms, audio_file)
+        if level < 0.003:  # about -50 dBFS: nothing to analyse
+            return {"score": 0.0, "status": "Silent Audio Track", "usable": False, "details": {"rms": round(level, 5)}}
+
+        from ..streams.audio import audio_stream
+        with open(audio_file, "rb") as fh:
+            audio_bytes = fh.read()
+        result = await asyncio.to_thread(lambda: asyncio.run(audio_stream.analyze(audio_bytes)))
+        result["usable"] = not str(result.get("status", "")).startswith("Error")
+        return result
+
+    def _run_av_consistency(self, frame, audio_file: str, workdir: str) -> Dict[str, Any]:
+        """ImageBind similarity between one frame and the audio. Informational; never votes."""
         try:
             from PIL import Image
-            import io
-            Image.open(io.BytesIO(img_bytes)).verify()
-            print("[Orchestrator] PIL Verify Success (Valid JPEG)")
-        except Exception as e:
-            print(f"[Orchestrator] CRITICAL: Generated frame is invalid: {e}")
-            return {"error": "Internal Error: Extracted video frame caused encoding failure."}
-        
+            from ..streams.multimodal import multimodal_stream
 
-        
-      
-        # 4. Execute Parallel
-        pipeline_results = await asyncio.gather(*tasks, return_exceptions=True)
-        from ..streams.genesis import genesis_stream
-        from ..streams.semantic import semantic_stream
-        from ..streams.audio import audio_stream
-        from ..streams.multimodal import multimodal_stream
-        
-        # Define tasks
-        task_visual = genesis_stream.analyze(img_bytes)
-        task_semantic = semantic_stream.analyze(img_bytes, claim)
-        
-        # Task Audio
-        async def run_audio():
-            if audio_path and os.path.exists(audio_path):
-                with open(audio_path, 'rb') as f:
-                    a_bytes = f.read()
-                return await audio_stream.analyze(a_bytes)
-            return {"score": 0.0, "status": "No Audio"}
-            
-        task_audio = run_audio()
-
-        # Task Multimodal (ImageBind)
-        async def run_multimodal():
-            if audio_path and os.path.exists(audio_path):
-                # We use the extracted keyframe as the vision input for speed
-                return await asyncio.to_thread(multimodal_stream.analyze, image_path, audio_path)
-            return {"score": 0.0, "status": "No Audio for Multimodal"}
-
-        task_multimodal = run_multimodal()
-
-        # Execute
-        results_list = await asyncio.gather(task_visual, task_semantic, task_audio, task_multimodal, return_exceptions=True)
-        vis, sem, aud, multi = results_list
-        
-        # Clean up temp files (Critical!)
-        try:
-             if os.path.exists(image_path): os.remove(image_path)
-             if audio_path and os.path.exists(audio_path): os.remove(audio_path)
-        except Exception as e:
-             print(f"[Orchestrator] cleanup error: {e}")
-
-        # Assemble
-        final = {
-            "visual": vis if not isinstance(vis, Exception) else {"score": 0.0, "error": str(vis)},
-            "semantic": sem if not isinstance(sem, Exception) else {"score": 0.0, "error": str(sem)},
-            "audio": aud if not isinstance(aud, Exception) else {"score": 0.0, "error": str(aud)},
-            "multimodal": multi if not isinstance(multi, Exception) else {"score": 0.0, "error": str(multi)}
-        }
-        
-        return final    
+            frame_path = os.path.join(workdir, "av_frame.png")
+            Image.fromarray(frame.image).save(frame_path)
+            return multimodal_stream.analyze(frame_path, audio_file)
+        except Exception as exc:
+            return {"score": 0.0, "status": "Error", "details": str(exc)}
 
 orchestrator = Orchestrator()

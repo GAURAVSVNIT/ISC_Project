@@ -5,6 +5,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import base64
 import asyncio
+import json
 import os
 from dotenv import load_dotenv
 
@@ -89,6 +90,57 @@ def calculate_fusion_score(visual_score: float, semantic_score: float, audio_sco
     
     return final_verdict, confidence
 
+class AnalysisError(Exception):
+    """Analysis could not produce a trustworthy result (shown to the user as an error)."""
+
+
+def _format_audio_result(stream_results: dict) -> dict:
+    """
+    Turn orchestrator.process_audio_request() output into the API response shape.
+    A failed detector raises instead of being reported as "Authentic" (an error
+    result carries score 0.0, which would otherwise read as 100% authentic).
+    """
+    audio_result = stream_results.get("audio") or {}
+    status = str(audio_result.get("status", "Unknown"))
+    if status.startswith("Error"):
+        raise AnalysisError(f"Audio analysis failed: {status}")
+
+    score = float(audio_result.get("score", 0.0))
+    is_fake = score >= 0.5
+    return {
+        "verdict": "Fake" if is_fake else "Authentic",
+        "confidence_score": float(score if is_fake else 1.0 - score),
+        "explanation": f"Audio analysis indicates {status}",
+        "visual": stream_results.get("visual", {}),
+        "semantic": stream_results.get("semantic", {}),
+        "context": stream_results.get("contextual", {}),
+        "audio": audio_result,
+        "metadata": stream_results.get("metadata"),
+        "cost_optimized": bool(stream_results.get("cost_optimized", False)),
+        "media_type": "audio",
+    }
+
+
+async def _finalize_video(result: dict, claim: str) -> dict:
+    """Add the LLM explanation and the audit-ledger entry to a finished video result."""
+    from .core.llm_reasoner import reasoner
+    from .core.blockchain import ledger
+
+    # The LLM call is blocking network I/O: keep it off the event loop.
+    result["explanation"] = await asyncio.to_thread(reasoner.explain, result, claim)
+    result["verification"] = ledger.add_block({
+        "claim": claim,
+        "media_type": "video",
+        "media_sha256": result.get("media_sha256"),
+        "verdict": result["verdict"],
+        "confidence": result["confidence_score"],
+        "visual_score": (result.get("visual") or {}).get("score"),
+        "audio_score": (result.get("audio") or {}).get("score") if (result.get("audio") or {}).get("usable") else None,
+        "model_version": settings.VERSION,
+    })
+    return result
+
+
 @app.post(f"{settings.API_V1_STR}/analyze", response_model=AnalysisResponse, tags=["Analysis"])
 @limiter.limit("10/minute")
 @limiter.limit("10/minute")
@@ -165,62 +217,26 @@ async def analyze(
 
     if is_video:
         # --- VIDEO PIPELINE ---
-        video_result = await orchestrator.process_video_request(file_bytes, claim)
-        
-        # Apply Fusion
-        vis = video_result.get("visual", {}).get("score", 0.0)
-        sem = video_result.get("semantic", {}).get("score", 0.0)
-        aud = video_result.get("audio", {}).get("score")
-        multi = video_result.get("multimodal", {}).get("score")
-        
-        v_verdict, v_conf = calculate_fusion_score(vis, sem, aud, multi)
-        
-        # Explainable AI (LLM Reasoner for Video)
-        from .core.llm_reasoner import reasoner
-        agg_results = {
-            "visual": video_result.get("visual", {}),
-            "semantic": video_result.get("semantic", {}),
-            "audio": video_result.get("audio", {}),
-            "multimodal": video_result.get("multimodal", {}),
-            "metadata": video_result.get("metadata", {})
-        }
-        explanation_text = reasoner.explain(agg_results, claim)
-        video_result["explanation"] = explanation_text
-        
-        # Blockchain (Mock/Real)
-        from .core.blockchain import ledger
-        audit_data = {
-            "claim": claim,
-            "verdict": v_verdict,
-            "confidence": v_conf,
-            "visual_score": vis,
-            "timestamp": asyncio.get_event_loop().time()
-        }
-        video_result["verification"] = ledger.add_block(audit_data)
-        
-        return video_result
-        
+        from .utils.video_processor import VideoError
+        try:
+            video_result = await orchestrator.process_video_request(file_bytes, claim, filename=file.filename)
+            if video_result.get("media_type") == "audio":
+                # Audio-only container (e.g. .m4a) that arrived without an audio MIME type.
+                return _format_audio_result(video_result)
+            return await _finalize_video(video_result, claim)
+        except (VideoError, AnalysisError) as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except RuntimeError as e:
+            # Detector could not load/run: report it, never guess a verdict.
+            raise HTTPException(status_code=503, detail=str(e))
+
     if is_audio:
         # --- AUDIO PIPELINE ---
         stream_results = await orchestrator.process_audio_request(file_bytes, claim)
-        
-        audio_result = stream_results.get("audio", {})
-        is_fake_audio = audio_result.get("score", 0.0) >= 0.5
-        
-        final_verdict = "Fake" if is_fake_audio else "Authentic"
-        confidence = audio_result.get("score", 0.0) if is_fake_audio else (1.0 - audio_result.get("score", 0.0))
-        
-        return {
-            "verdict": final_verdict,
-            "confidence_score": float(confidence),
-            "explanation": f"Audio analysis indicates {audio_result.get('status', 'Unknown')}",
-            "visual": stream_results.get("visual", {}),
-            "semantic": stream_results.get("semantic", {}),
-            "context": stream_results.get("contextual", {}),
-            "audio": audio_result,
-            "metadata": None,
-            "cost_optimized": False
-        }
+        try:
+            return _format_audio_result(stream_results)
+        except AnalysisError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     # --- IMAGE PIPELINE ---
     
@@ -308,14 +324,38 @@ async def analyze_realtime(websocket: WebSocket):
     await websocket.accept()
     
     try:
-        # Receive initial data
+        # Two upload protocols are accepted:
+        #  1. Legacy: one JSON message {"image": <base64>, "claim": ...}. Limited by the
+        #     WebSocket message size (16 MB by default), so only suitable for small files.
+        #  2. Chunked: JSON {"type": "start", "claim", "filename", "size"}, then binary
+        #     frames with the file contents, then JSON {"type": "end"}. Used for video.
         data = await websocket.receive_json()
-        image_base64 = data.get("image")
-        claim = data.get("claim", "")
+        claim = data.get("claim", "") or ""
+        filename = data.get("filename")
         enable_defense = True # Enforced
-        
-        # Decode image/video
-        image_bytes = base64.b64decode(image_base64)
+
+        if data.get("type") == "start":
+            declared = int(data.get("size") or 0)
+            if declared > settings.MAX_UPLOAD_SIZE:
+                raise AnalysisError("File too large. Maximum size is 100MB.")
+            buffer = bytearray()
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect()
+                if message.get("bytes") is not None:
+                    buffer.extend(message["bytes"])
+                    if len(buffer) > settings.MAX_UPLOAD_SIZE:
+                        raise AnalysisError("File too large. Maximum size is 100MB.")
+                elif message.get("text") is not None:
+                    if json.loads(message["text"]).get("type") == "end":
+                        break
+            image_bytes = bytes(buffer)
+        else:
+            image_bytes = base64.b64decode(data.get("image") or "")
+
+        if not image_bytes:
+            raise AnalysisError("Empty upload.")
         raw_bytes = image_bytes # Save original for metadata check
         
         from .defense.art_shield import shield
@@ -342,88 +382,46 @@ async def analyze_realtime(websocket: WebSocket):
              })
 
              stream_results = await orchestrator.process_audio_request(image_bytes, claim)
-             audio_result = stream_results.get("audio", {}) or {}
-             score = float(audio_result.get("score", 0.0))
-             is_fake_audio = score >= 0.5
-             a_verdict = "Fake" if is_fake_audio else "Authentic"
-             a_conf = score if is_fake_audio else (1.0 - score)
-
+             audio_payload = _format_audio_result(stream_results)
              await websocket.send_json({
                 "stage": "complete",
                 "progress": 100,
-                "message": f"✅ Audio Analysis Complete - {a_verdict}",
+                "message": f"✅ Audio Analysis Complete - {audio_payload['verdict']}",
                 "status": "success",
-                "results": {
-                    "verdict": a_verdict,
-                    "confidence_score": float(a_conf),
-                    "explanation": f"Audio analysis indicates {audio_result.get('status', 'Unknown')}",
-                    "visual": stream_results.get("visual", {}),
-                    "semantic": stream_results.get("semantic", {}),
-                    "context": stream_results.get("contextual", {}),
-                    "audio": audio_result,
-                    "metadata": stream_results.get("metadata"),
-                    "cost_optimized": bool(stream_results.get("cost_optimized", False)),
-                }
+                "results": audio_payload
              })
              return
 
         if is_video:
              # --- VIDEO PIPELINE ---
-             await websocket.send_json({
-                "stage": "video_processing",
-                "progress": 20,
-                "message": "🎥 Analyzing Video Sequence (Frames + Audio)...",
-                "status": "processing"
-            })
-             
-             # Heavy lifting done by orchestrator (OpenCV + Models)
-             final_result = await orchestrator.process_video_request(image_bytes, claim)
-             
-             if "error" in final_result:
-                 raise Exception(final_result["error"])
+             async def video_progress(stage: str, percent: int, message: str):
+                 await websocket.send_json({
+                    "stage": stage, "progress": percent, "message": message, "status": "processing"
+                 })
 
-             # --- FUSION & AGGREGATION ---
-             vis = final_result.get("visual", {}).get("score", 0.0)
-             sem = final_result.get("semantic", {}).get("score", 0.0)
-             aud = final_result.get("audio", {}).get("score")
-             multi = final_result.get("multimodal", {}).get("score")
-             
-             
-             # Calculate Fusion directly (defined in global scope)
-             v_verdict, v_conf = calculate_fusion_score(vis, sem, aud, multi)
-             
-             
-             final_result["verdict"] = v_verdict
-             final_result["confidence_score"] = float(v_conf)
-             
-             # Blockchain Audit
-             from .core.blockchain import ledger
-             audit_data = {
-                "claim": claim,
-                "verdict": v_verdict,
-                "confidence": v_conf,
-                "visual_score": vis,
-                "model_version": settings.VERSION,
-                "timestamp": asyncio.get_event_loop().time()
-             }
-             verification = ledger.add_block(audit_data)
-             final_result["verification"] = verification
+             final_result = await orchestrator.process_video_request(
+                 image_bytes, claim, progress=video_progress, filename=filename
+             )
 
-             # Explainable AI for Video
-             from .core.llm_reasoner import reasoner
-             agg_results = {
-                 "visual": final_result.get("visual", {}),
-                 "semantic": final_result.get("semantic", {}),
-                 "audio": final_result.get("audio", {}),
-                 "multimodal": final_result.get("multimodal", {}),
-                 "metadata": final_result.get("metadata", {})
-             }
-             final_result["explanation"] = reasoner.explain(agg_results, claim)
+             if final_result.get("media_type") == "audio":
+                 # Audio-only container (e.g. .m4a): the orchestrator ran the audio pipeline.
+                 audio_payload = _format_audio_result(final_result)
+                 await websocket.send_json({
+                    "stage": "complete",
+                    "progress": 100,
+                    "message": f"✅ Audio Analysis Complete - {audio_payload['verdict']}",
+                    "status": "success",
+                    "results": audio_payload
+                 })
+                 return
+
+             await video_progress("explanation", 95, "📝 Writing forensic report...")
+             final_result = await _finalize_video(final_result, claim)
 
              await websocket.send_json({
                 "stage": "complete",
                 "progress": 100,
-                "message": f"✅ Video Analysis Complete - {v_verdict}",
+                "message": f"✅ Video Analysis Complete - {final_result['verdict']}",
                 "status": "success",
                 "results": final_result
             })

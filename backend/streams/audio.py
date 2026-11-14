@@ -15,6 +15,7 @@ class AudioStream:
         self.feature_extractor = None
         self.is_ready = False
         self.model_name = "Hemgg/Deepfake-audio-detection"  # Or "bisher/wav2vec2-asv-deepfake"
+        self.fake_index = None  # index of the "AI voice" class, read from the model config
 
     def _ensure_models_loaded(self):
         """
@@ -28,6 +29,8 @@ class AudioStream:
             self.feature_extractor = AutoFeatureExtractor.from_pretrained(self.model_name)
             self.model = AutoModelForAudioClassification.from_pretrained(self.model_name).to(self.device)
             self.model.eval()
+            self.fake_index = self._find_fake_index(self.model.config.id2label)
+            print(f"Audio Stream labels: {self.model.config.id2label} -> fake index {self.fake_index}")
             self.is_ready = True
             print("Audio Stream Loaded Successfully.")
             return True
@@ -37,6 +40,24 @@ class AudioStream:
             print(f"Error loading Audio Stream: {e}")
             self.is_ready = False
             return False
+
+    @staticmethod
+    def _find_fake_index(id2label) -> int:
+        """
+        Which output class means "synthetic voice". Read from the model's own label names
+        instead of assuming an order: Hemgg/Deepfake-audio-detection is
+        {0: 'AIVoice', 1: 'HumanVoice'}, i.e. index 0 is the fake class.
+        """
+        fake_words = ("ai", "fake", "spoof", "synthetic", "deepfake", "generated")
+        real_words = ("human", "real", "bonafide", "bona-fide", "genuine")
+        labels = {int(k): str(v).lower() for k, v in (id2label or {}).items()}
+        for idx, name in labels.items():
+            if any(w in name for w in fake_words) and not any(w in name for w in real_words):
+                return idx
+        for idx, name in labels.items():
+            if any(w in name for w in real_words) and len(labels) == 2:
+                return 1 - idx
+        raise ValueError(f"Cannot tell which audio class is 'fake' from labels {id2label}")
 
     def preprocess_audio(self, file_bytes: bytes, sr=16000, duration=3.0) -> Tuple[List[np.ndarray], int]:
         """
@@ -96,12 +117,12 @@ class AudioStream:
                 phase_coherence = 0.0
             
             # Frequency band energy
-            bands = librosa.feature.rms(S=mag, frame_length=hop_length)
-            cutoff = sr // 2 // 4 # Approx 4kHz
-            low_band = librosa.feature.rms(S=mag[:cutoff])
-            high_band = librosa.feature.rms(S=mag[cutoff:2*cutoff])
-            
-            band_energy_mean = np.mean([low_band.mean(), high_band.mean()])
+            # (rows of `mag` are frequency bins 0..sr/2; split at ~4 kHz)
+            cutoff = mag.shape[0] // 2
+            low_band = np.sqrt(np.mean(mag[:cutoff] ** 2))
+            high_band = np.sqrt(np.mean(mag[cutoff:] ** 2))
+
+            band_energy_mean = np.mean([low_band, high_band])
             
             # Energy Variance (Temporal artifacts)
             energy_var = np.var(librosa.feature.rms(y=audio_window))
@@ -146,10 +167,8 @@ class AudioStream:
                 
                 with torch.no_grad():
                     outputs = self.model(**inputs)
-                    # Class 0: Real, Class 1: Fake (usually, depends on specific model)
-                    # For 'Hemgg/Deepfake-audio-detection', check model card labels.
-                    # Assuming [Real, Fake] for now.
-                    prob = torch.softmax(outputs.logits, dim=-1)[0][1].item()
+                    # Probability of the "synthetic voice" class (index from the model config).
+                    prob = torch.softmax(outputs.logits, dim=-1)[0][self.fake_index].item()
                     probs.append(prob)
                 
                 # Feature Extraction (for explanation)

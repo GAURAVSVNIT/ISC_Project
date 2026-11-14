@@ -21,6 +21,8 @@ export interface AnalysisHookReturn {
     error: string | null;
 }
 
+const UPLOAD_CHUNK_BYTES = 512 * 1024;
+
 export function useRealtimeAnalysis(): AnalysisHookReturn {
     const [progress, setProgress] = useState(0);
     const [stage, setStage] = useState("");
@@ -41,30 +43,49 @@ export function useRealtimeAnalysis(): AnalysisHookReturn {
             setIsAnalyzing(true);
 
             try {
-                // Convert image to base64
-                const base64Image = await new Promise<string>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        const base64 = (reader.result as string).split(",")[1];
-                        resolve(base64);
-                    };
-                    reader.onerror = reject;
-                    reader.readAsDataURL(image);
-                });
-
                 // Create WebSocket connection
                 const ws = new WebSocket("ws://localhost:8000/ws/analyze");
+                ws.binaryType = "arraybuffer";
                 wsRef.current = ws;
 
-                ws.onopen = () => {
+                ws.onopen = async () => {
                     console.log("WebSocket connected");
-                    ws.send(
-                        JSON.stringify({
-                            image: base64Image,
-                            claim,
-                            enable_defense: true, // Enforced by default
-                        })
-                    );
+                    try {
+                        // Chunked upload: a JSON header, the file as binary frames, then an end marker.
+                        // A single base64 JSON message is capped by the WebSocket message size
+                        // (16 MB on the server), which most videos exceed.
+                        ws.send(
+                            JSON.stringify({
+                                type: "start",
+                                claim,
+                                filename: image.name,
+                                size: image.size,
+                                enable_defense: true, // Enforced by default
+                            })
+                        );
+
+                        setStage("upload");
+                        const totalMb = (image.size / (1024 * 1024)).toFixed(1);
+                        for (let offset = 0; offset < image.size; offset += UPLOAD_CHUNK_BYTES) {
+                            if (ws.readyState !== WebSocket.OPEN) return;
+                            const chunk = await image.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer();
+                            ws.send(chunk);
+                            // Let the socket drain so large files do not pile up in memory.
+                            while (ws.bufferedAmount > 4 * UPLOAD_CHUNK_BYTES && ws.readyState === WebSocket.OPEN) {
+                                await new Promise((resolve) => setTimeout(resolve, 20));
+                            }
+                            const sent = Math.min(offset + UPLOAD_CHUNK_BYTES, image.size);
+                            setProgress(Math.round((sent / image.size) * 5));
+                            setMessage(`Uploading ${(sent / (1024 * 1024)).toFixed(1)} / ${totalMb} MB...`);
+                        }
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: "end" }));
+                        }
+                    } catch (err) {
+                        setError(err instanceof Error ? err.message : "Upload failed");
+                        setIsAnalyzing(false);
+                        ws.close();
+                    }
                 };
 
                 ws.onmessage = (event) => {

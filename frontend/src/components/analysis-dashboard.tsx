@@ -5,6 +5,7 @@ import { marked } from "marked";
 import { UploadZone } from "./upload-zone";
 import { StreamCard } from "./stream-card";
 import { VerdictBadge } from "./verdict-badge";
+import { VideoTimeline, VideoAnalysis, VideoProvenance } from "./video-timeline";
 import {
     Eye,
     Brain,
@@ -13,6 +14,7 @@ import {
     ShieldAlert,
     Sparkles,
     Music,
+    Link2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,6 +61,7 @@ interface AnalysisResult {
         score: number;
         status: string;
         model: string;
+        usable?: boolean; // video only: false when the track is missing/silent and did not vote
         details?: {
             phase_coherence_avg: number;
             temporal_artifact_avg: number;
@@ -69,6 +72,12 @@ interface AnalysisResult {
         should_short_circuit: boolean;
         reason: string;
         ai_tags: string[];
+    } & VideoProvenance;
+    media_type?: string;
+    video?: VideoAnalysis;
+    multimodal?: {
+        score: number;
+        status: string;
     };
     cost_optimized: boolean;
     verification?: {
@@ -222,6 +231,11 @@ export function AnalysisDashboard() {
                         </div>
                     </div>
 
+                    {/* Video: frame-by-frame timeline */}
+                    {result.video && (
+                        <VideoTimeline video={result.video} provenance={result.metadata} />
+                    )}
+
                     {/* Streams Grid */}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 
@@ -292,8 +306,12 @@ export function AnalysisDashboard() {
                                 icon={Music}
                                 type="visual" // Reusing visual color style for now
                                 status={result.audio.status}
-                                score={result.audio.score}
-                                description={result.audio.model}
+                                score={result.audio.usable === false ? undefined : result.audio.score}
+                                description={
+                                    result.audio.usable === false
+                                        ? "The audio track was not used for the verdict."
+                                        : result.audio.model
+                                }
                             >
                                 {result.audio.details && (
                                     <div className="mt-4 pt-4 border-t border-border/50 space-y-3">
@@ -314,6 +332,18 @@ export function AnalysisDashboard() {
                             </StreamCard>
                         )}
 
+
+                        {/* Audio-visual consistency (video, optional, informational) */}
+                        {result.multimodal && (
+                            <StreamCard
+                                title="Audio-Visual Match"
+                                icon={Link2}
+                                type="semantic"
+                                status={result.multimodal.status}
+                                score={result.multimodal.score}
+                                description="ImageBind similarity between picture and sound. Shown for context; it does not change the verdict."
+                            />
+                        )}
 
                         {/* Stream C: Context */}
                         {result.context && (
@@ -373,7 +403,9 @@ export function AnalysisDashboard() {
                                 <div className="mt-4 pt-4 border-t border-border/50">
                                     <p className="text-xs text-muted-foreground flex items-center gap-2">
                                         <Sparkles className="w-3 h-3 text-primary" />
-                                        EXIF data contains definitive AI generation tags.
+                                        {result.video
+                                            ? "The file's own metadata declares it AI-generated."
+                                            : "EXIF data contains definitive AI generation tags."}
                                     </p>
                                     {result.metadata.ai_tags.length > 0 && (
                                         <div className="mt-2 flex flex-wrap gap-1">

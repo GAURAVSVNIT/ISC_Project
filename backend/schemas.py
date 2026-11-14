@@ -30,6 +30,12 @@ class AnalysisResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     cost_optimized: bool = False
     verification: Optional[Dict[str, Any]] = None # Blockchain Audit Data
+    # Video pipeline
+    media_type: Optional[str] = None            # "image" | "audio" | "video"
+    media_sha256: Optional[str] = None          # SHA-256 of the uploaded file (also in the ledger)
+    risk_score: Optional[float] = None          # 0 = authentic, 1 = fake (before thresholding)
+    video: Optional[Dict[str, Any]] = None      # container facts, per-frame timeline, segments
+    multimodal: Optional[Dict[str, Any]] = None # audio-visual consistency (informational)
 
 class HealthResponse(BaseModel):
     status: str
